@@ -1,7 +1,7 @@
 'use client';
 
 import { useTranslations } from 'next-intl';
-import { Menu, Phone } from 'lucide-react';
+import { Menu, Phone, ChevronDown } from 'lucide-react';
 import { useState } from 'react';
 import { Link } from '@/navigation';
 import { Logo } from './logo';
@@ -13,10 +13,14 @@ const navItems = [
   { href: '/income', key: 'income' },
   { href: '/expense', key: 'expense' },
   { href: '/shop', key: 'shop' },
-  { href: '/donations', key: 'donations' },
   { href: '/fitrah', key: 'fitrah' },
   { href: '/projects', key: 'projects' },
   { href: '/gallery', key: 'gallery' }
+];
+
+const donationOptions = [
+  { href: '/donations?type=friday', key: 'fridayDonation' },
+  { href: '/donations?type=box', key: 'donationBox' }
 ];
 
 export function SiteHeader({
@@ -27,7 +31,9 @@ export function SiteHeader({
   masjidName?: string;
 }) {
   const t = useTranslations('common');
+  const tNav = useTranslations('nav');
   const [open, setOpen] = useState(false);
+  const [donationDropdownOpen, setDonationDropdownOpen] = useState(false);
   const normalizedName = (masjidName || '').trim();
   const words = normalizedName.split(/\s+/).filter(Boolean);
   const hasSplitName = words.length > 2;
@@ -43,9 +49,27 @@ export function SiteHeader({
         <nav className="hidden items-center gap-1 xl:flex">
           {navItems.map((item) => (
             <Link key={item.key} href={item.href} className="rounded-full px-3 py-2 text-sm font-semibold text-slate-600 transition hover:bg-emerald-50 hover:text-emerald-800 dark:text-slate-200 dark:hover:bg-white/10 dark:hover:text-white">
-              {t(item.key as 'home' | 'gallery' | 'projects' | 'income' | 'expense' | 'shop' | 'donations')}
+              {t(item.key as 'home' | 'gallery' | 'projects' | 'income' | 'expense' | 'shop')}
             </Link>
           ))}
+          {/* Donation Dropdown */}
+          <div className="relative group">
+            <button className="rounded-full px-3 py-2 text-sm font-semibold text-slate-600 transition hover:bg-emerald-50 hover:text-emerald-800 dark:text-slate-200 dark:hover:bg-white/10 dark:hover:text-white inline-flex items-center gap-1">
+              {tNav('donation')}
+              <ChevronDown className="h-4 w-4 transition group-hover:rotate-180" />
+            </button>
+            <div className="absolute left-0 top-full hidden group-hover:block bg-white dark:bg-slate-950 rounded-lg shadow-lg border border-slate-200 dark:border-white/10 overflow-hidden min-w-max z-50">
+              {donationOptions.map((option) => (
+                <Link
+                  key={option.key}
+                  href={option.href}
+                  className="block px-4 py-2 text-sm font-semibold text-slate-600 dark:text-slate-200 hover:bg-emerald-50 dark:hover:bg-white/10 hover:text-emerald-800 dark:hover:text-white transition"
+                >
+                  {tNav(option.key as 'fridayDonation' | 'donationBox')}
+                </Link>
+              ))}
+            </div>
+          </div>
         </nav>
         <div className="hidden items-center gap-2 lg:flex">
           <LanguageSwitcher />
@@ -64,9 +88,32 @@ export function SiteHeader({
           <div className="grid gap-3">
             {navItems.map((item) => (
               <Link key={item.key} href={item.href} className="rounded-2xl border border-slate-200 bg-slate-50 px-4 py-3 text-sm font-semibold text-slate-800 transition hover:border-emerald-200 hover:bg-emerald-50 dark:border-white/10 dark:bg-white/5 dark:text-white dark:hover:bg-white/10">
-                {t(item.key as 'home' | 'gallery' | 'projects' | 'income' | 'expense' | 'shop' | 'donations')}
+                {t(item.key as 'home' | 'gallery' | 'projects' | 'income' | 'expense' | 'shop')}
               </Link>
             ))}
+            {/* Mobile Donation Dropdown */}
+            <div>
+              <button
+                onClick={() => setDonationDropdownOpen(!donationDropdownOpen)}
+                className="w-full rounded-2xl border border-slate-200 bg-slate-50 px-4 py-3 text-sm font-semibold text-slate-800 transition hover:border-emerald-200 hover:bg-emerald-50 dark:border-white/10 dark:bg-white/5 dark:text-white dark:hover:bg-white/10 flex items-center justify-between"
+              >
+                {tNav('donation')}
+                <ChevronDown className={`h-4 w-4 transition ${donationDropdownOpen ? 'rotate-180' : ''}`} />
+              </button>
+              {donationDropdownOpen && (
+                <div className="mt-2 grid gap-2 pl-2">
+                  {donationOptions.map((option) => (
+                    <Link
+                      key={option.key}
+                      href={option.href}
+                      className="block rounded-xl border border-slate-200 bg-white px-4 py-2 text-sm font-semibold text-slate-700 transition hover:border-emerald-200 hover:bg-emerald-50 dark:border-white/10 dark:bg-slate-900 dark:text-slate-200 dark:hover:bg-white/10"
+                    >
+                      {tNav(option.key as 'fridayDonation' | 'donationBox')}
+                    </Link>
+                  ))}
+                </div>
+              )}
+            </div>
             <div className="flex items-center gap-3">
               <LanguageSwitcher />
               <ThemeToggle />

@@ -73,6 +73,8 @@
     "expense": "Expense",
     "shop": "Shop",
     "donation": "Donation",
+    "fridayDonation": "Friday Donation",
+    "donationBox": "Donation Box",
     "ramadanDonation": "Ramadan Donation",
     "ramadanExpense": "Ramadan Expense",
     "fitrah": "Fitrah",
