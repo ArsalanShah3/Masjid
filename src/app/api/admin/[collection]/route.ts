@@ -5,6 +5,7 @@ import { getServerSession } from '@/lib/auth';
 import { resourceMap } from '@/lib/admin-resources';
 import { rateLimit } from '@/lib/rate-limit';
 import { minutesToCanonical24, parsePrayerTimeToMinutes } from '@/lib/prayer-activity';
+import { revalidatePublicData } from '@/lib/revalidate-public';
 
 type Params = { params: Promise<{ collection: string }> };
 
@@ -66,6 +67,56 @@ function normalizePrayerTimesBody(body: Record<string, unknown>) {
   return { ok: true as const };
 }
 
+function normalizeShopRecordBody(body: Record<string, unknown>) {
+  const dateValue = String(body.date ?? body.buyDate ?? '').trim() || new Date().toISOString().slice(0, 10);
+  const date = /^\d{4}-\d{2}-\d{2}$/.test(dateValue)
+    ? new Date(`${dateValue}T00:00:00Z`)
+    : new Date(dateValue);
+
+  if (Number.isNaN(date.getTime())) {
+    return { ok: false as const, message: 'Invalid shop date. Use a valid date.' };
+  }
+
+  body.date = dateValue;
+  if (body.buyDate == null || String(body.buyDate).trim() === '') {
+    body.buyDate = dateValue;
+  }
+
+  if (body.month == null || body.year == null) {
+    body.month = /^\d{4}-\d{2}-\d{2}$/.test(dateValue) ? date.getUTCMonth() + 1 : date.getMonth() + 1;
+    body.year = /^\d{4}-\d{2}-\d{2}$/.test(dateValue) ? date.getUTCFullYear() : date.getFullYear();
+  }
+
+  return { ok: true as const };
+}
+
+function deriveFallbackDate(record: Record<string, unknown>) {
+  const rawDate = String(record.date ?? '').trim();
+  if (rawDate) {
+    return record;
+  }
+
+  const month = Number(record.month ?? 0);
+  const year = Number(record.year ?? 0);
+  if (!Number.isFinite(month) || !Number.isFinite(year) || month < 1 || month > 12) {
+    return record;
+  }
+
+  return {
+    ...record,
+    date: new Date(Date.UTC(year, month - 1, 1)).toISOString().slice(0, 10)
+  };
+}
+
+async function ensureDatabaseReady() {
+  try {
+    await connectToDatabase();
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 export async function GET(_request: Request, { params }: Params) {
   const { collection } = await params;
   const resource = resourceMap[collection as keyof typeof resourceMap];
@@ -75,32 +126,43 @@ export async function GET(_request: Request, { params }: Params) {
   const session = await getServerSession();
   if (!session) return apiError('Unauthorized', 401);
 
-  await connectToDatabase();
-
-  if (collection === 'shop-records') {
-    const url = new URL(_request.url);
-    const serialQuery = url.searchParams.get('serial');
-    if (serialQuery !== null) {
-      const trimmedSerial = serialQuery.trim();
-      if (!trimmedSerial) {
-        return apiError('Serial number is required', 400);
-      }
-
-      const found = await resource.model.findOne({ serialNumber: trimmedSerial }).lean();
-      if (!found) {
-        return json({ ok: true, item: null, found: false, message: 'No shop record found for this serial number.' });
-      }
-
-      return json({ ok: true, item: found, found: true });
-    }
+  if (!(await ensureDatabaseReady())) {
+    return apiError('Database connection unavailable', 503);
   }
 
-  const items = await (collection === 'shop-records'
-    ? resource.model.find().sort({ year: -1, month: -1, date: -1, createdAt: -1 }).lean()
-    : collection === 'prayer-times'
-      ? resource.model.find().sort({ dateKey: -1, createdAt: -1 }).lean()
-      : resource.model.find().sort({ createdAt: -1 }).lean());
-  return json({ ok: true, items });
+  try {
+    if (collection === 'shop-records') {
+      const url = new URL(_request.url);
+      const serialQuery = url.searchParams.get('serial');
+      if (serialQuery !== null) {
+        const trimmedSerial = serialQuery.trim();
+        if (!trimmedSerial) {
+          return apiError('Serial number is required', 400);
+        }
+
+        const found = await resource.model.findOne({ serialNumber: trimmedSerial }).lean();
+        if (!found) {
+          return json({ ok: true, item: null, found: false, message: 'No shop record found for this serial number.' });
+        }
+
+        return json({ ok: true, item: found, found: true });
+      }
+    }
+
+    const items = await (collection === 'shop-records'
+      ? resource.model.find().sort({ year: -1, month: -1, date: -1, createdAt: -1 }).lean()
+      : collection === 'prayer-times'
+        ? resource.model.find().sort({ dateKey: -1, createdAt: -1 }).lean()
+        : resource.model.find().sort({ createdAt: -1 }).lean());
+
+    const hydratedItems = collection === 'expense-records'
+      ? (items as Array<Record<string, unknown>>).map((item) => deriveFallbackDate(item))
+      : items;
+
+    return json({ ok: true, items: hydratedItems });
+  } catch {
+    return apiError('Database query failed', 503);
+  }
 }
 
 export async function POST(request: Request, { params }: Params) {
@@ -115,6 +177,10 @@ export async function POST(request: Request, { params }: Params) {
 
   const session = await getServerSession();
   if (!session) return apiError('Unauthorized', 401);
+
+  if (!(await ensureDatabaseReady())) {
+    return apiError('Database connection unavailable', 503);
+  }
 
   const body = await request.json().catch(() => null);
   if (!body || typeof body !== 'object') {
@@ -136,10 +202,17 @@ export async function POST(request: Request, { params }: Params) {
     }
   }
 
-  if (collection === 'income-records') {
+  if (collection === 'income-records' || collection === 'expense-records') {
     const candidate = body as Record<string, unknown>;
     if (candidate.date == null || String(candidate.date).trim() === '') {
       candidate.date = new Date().toISOString().slice(0, 10);
+    }
+  }
+
+  if (collection === 'shop-records') {
+    const normalized = normalizeShopRecordBody(body as Record<string, unknown>);
+    if (!normalized.ok) {
+      return apiError(normalized.message, 400);
     }
   }
 
@@ -206,6 +279,7 @@ export async function POST(request: Request, { params }: Params) {
     const year = Number(input.year ?? 0);
     const currentMonthlyRent = Number(input.monthlyRent ?? 0);
     const paidAmount = Number(input.paymentAmount ?? 0);
+    const manualPreviousBalance = Number((input as Record<string, unknown>).previousBalance ?? Number.NaN);
 
     if (!shopName || !ownerName) {
       return apiError('Shop name and tenant name are required.', 400);
@@ -246,10 +320,12 @@ export async function POST(request: Request, { params }: Params) {
     // Total unpaid arrears from all earlier months, as they stood before this
     // transaction's payment is applied. This is what "Previous Balance" means:
     // how much the shop still owed from before, separate from this month's rent.
-    const previousBalanceBeforePayment = priorRecords.reduce(
-      (sum, record) => sum + Number(record.debtAmount ?? 0),
-      0
-    );
+    const previousBalanceBeforePayment = Number.isFinite(manualPreviousBalance) && manualPreviousBalance >= 0
+      ? manualPreviousBalance
+      : priorRecords.reduce(
+          (sum, record) => sum + Number(record.debtAmount ?? 0),
+          0
+        );
 
     const rentHistoryEntries: Record<string, Record<string, unknown>> = {};
 
@@ -304,14 +380,20 @@ export async function POST(request: Request, { params }: Params) {
     });
 
     const currentEntry = rentHistoryEntries[currentKey] as Record<string, unknown>;
-    const currentBalance = Number(currentEntry.remainingBalance ?? 0);
-    const currentStatus = currentBalance === 0 ? 'Clear' : (Number(currentEntry.paidAmount ?? 0) > 0 ? 'Partial' : 'Due');
+    const paymentDate = String(shopData.date ?? existingRecord?.date ?? new Date().toISOString().slice(0, 10));
+    const currentBalance = Math.max(0, previousBalanceBeforePayment + currentMonthlyRent - Math.min(paidAmount, previousBalanceBeforePayment + currentMonthlyRent));
+    const savedPaymentAmount = Math.min(Math.max(0, paidAmount), previousBalanceBeforePayment + currentMonthlyRent);
+    const currentStatus = currentBalance === 0 ? 'Clear' : (savedPaymentAmount > 0 ? 'Partial' : 'Due');
 
     currentEntry.previousBalance = previousBalanceBeforePayment;
+    currentEntry.remainingBalance = currentBalance;
+    currentEntry.paidAmount = savedPaymentAmount;
+    currentEntry.status = currentStatus;
+    currentEntry.paymentDate = paymentDate;
 
     (parsed.data as Record<string, unknown>).monthlyRent = currentMonthlyRent;
     (parsed.data as Record<string, unknown>).debtAmount = currentBalance;
-    (parsed.data as Record<string, unknown>).paymentAmount = Number(currentEntry.paidAmount ?? 0);
+    (parsed.data as Record<string, unknown>).paymentAmount = savedPaymentAmount;
     (parsed.data as Record<string, unknown>).paymentStatus = currentStatus;
     (parsed.data as Record<string, unknown>).previousBalance = previousBalanceBeforePayment;
     (parsed.data as Record<string, unknown>).rentHistory = rentHistoryEntries;
@@ -375,6 +457,7 @@ export async function POST(request: Request, { params }: Params) {
         }
 
         await resource.model.deleteMany({ _id: { $ne: updated._id } });
+        revalidatePublicData(collection);
         return json({ ok: true, item: updated });
       }
     }
@@ -386,6 +469,7 @@ export async function POST(request: Request, { params }: Params) {
         return apiError('Unable to update shop record', 400);
       }
 
+      revalidatePublicData(collection);
       return json({ ok: true, item: updated });
     }
 
@@ -405,6 +489,7 @@ export async function POST(request: Request, { params }: Params) {
       await resource.model.deleteMany({ _id: { $ne: created._id } });
     }
 
+    revalidatePublicData(collection);
     return json({ ok: true, item: created }, { status: 201 });
   } catch (error) {
     const message = error instanceof Error ? error.message : 'Unable to create record';

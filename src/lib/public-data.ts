@@ -72,21 +72,23 @@ function isDatabaseConfigured() {
 }
 
 const getSiteSettingsCached = unstable_cache(async (): Promise<SiteSettings> => {
-  try {
-    await connectToDatabase();
-    const settings = await MasjidSettings.findOne().sort({ updatedAt: -1 }).lean<SiteSettings | null>();
-    return settings ? serialize(settings) : fallbackSettings;
-  } catch {
-    return fallbackSettings;
-  }
-}, ['public-site-settings'], { revalidate: 60 });
+  await connectToDatabase();
+  const settings = await MasjidSettings.findOne().sort({ updatedAt: -1 }).lean<SiteSettings | null>();
+  return settings ? serialize(settings) : fallbackSettings;
+}, ['public-site-settings'], { revalidate: 60, tags: ['public-site-settings'] });
 
 export async function getSiteSettings(): Promise<SiteSettings> {
   if (!isDatabaseConfigured()) {
     return fallbackSettings;
   }
 
-  return getSiteSettingsCached();
+  try {
+    return await getSiteSettingsCached();
+  } catch {
+    // Only used for this one request; a failed revalidation never overwrites
+    // the cache entry with fallback data.
+    return fallbackSettings;
+  }
 }
 
 export async function getHeroSlides() {
@@ -104,10 +106,14 @@ export async function getHeroSlides() {
     return fallbackSlides;
   }
 
-  try {
+  const getHeroSlidesCached = unstable_cache(async () => {
     await connectToDatabase();
     const slides = await HeroSlide.find({ active: true }).sort({ order: 1, createdAt: -1 }).lean();
-     return slides.length > 0 ? serialize(slides) : fallbackSlides;
+    return slides.length > 0 ? serialize(slides) : fallbackSlides;
+  }, ['public-hero-slides'], { revalidate: 60, tags: ['public-hero-slides'] });
+
+  try {
+    return await getHeroSlidesCached();
   } catch {
     return fallbackSlides;
   }
@@ -130,21 +136,18 @@ export async function getTodayPrayerTimes(): Promise<Record<string, string>> {
   if (isDatabaseConfigured()) {
     const getTodayPrayerTimesCached = unstable_cache(
       async (): Promise<Record<string, string>> => {
-        try {
-          await connectToDatabase();
-          const latestPrayerTimes = await PrayerTimes.findOne().sort({ dateKey: -1, createdAt: -1 }).lean();
-          if (latestPrayerTimes) {
-            return serialize(latestPrayerTimes) as Record<string, string>;
-          }
-          return fallbackPrayerTimes;
-        } catch {
-          return fallbackPrayerTimes;
-        }
+        await connectToDatabase();
+        const latestPrayerTimes = await PrayerTimes.findOne().sort({ dateKey: -1, createdAt: -1 }).lean();
+        return latestPrayerTimes ? (serialize(latestPrayerTimes) as Record<string, string>) : fallbackPrayerTimes;
       },
       ['public-prayer-times', todayKey],
-      { revalidate: 60 }
+      { revalidate: 60, tags: ['public-prayer-times'] }
     );
-    baseTimes = await getTodayPrayerTimesCached();
+    try {
+      baseTimes = await getTodayPrayerTimesCached();
+    } catch {
+      baseTimes = fallbackPrayerTimes;
+    }
   }
 
   // Maghrib is ALWAYS sourced from the Aladhan API (Karachi). The previously
@@ -169,38 +172,40 @@ export async function getSummaryMetrics() {
   }
 
   const getSummaryMetricsCached = unstable_cache(async () => {
-    try {
-      await connectToDatabase();
-      const [incomeAgg, expenseAgg, donationAgg, projectCount, shopCount, fitrahAgg] = await Promise.all([
-        IncomeRecord.aggregate([{ $group: { _id: null, total: { $sum: '$amount' } } }]),
-        ExpenseRecord.aggregate([{ $group: { _id: null, total: { $sum: '$amount' } } }]),
-        Donation.aggregate([{ $group: { _id: null, total: { $sum: '$amount' } } }]),
-        Project.countDocuments(),
-        ShopRecord.countDocuments(),
-        FitrahRecord.aggregate([{ $group: { _id: null, total: { $sum: '$amount' } } }])
-      ]);
+    await connectToDatabase();
+    const [incomeAgg, expenseAgg, donationAgg, projectCount, shopCount, fitrahAgg] = await Promise.all([
+      IncomeRecord.aggregate([{ $group: { _id: null, total: { $sum: '$amount' } } }]),
+      ExpenseRecord.aggregate([{ $group: { _id: null, total: { $sum: '$amount' } } }]),
+      Donation.aggregate([{ $group: { _id: null, total: { $sum: '$amount' } } }]),
+      Project.countDocuments(),
+      ShopRecord.countDocuments(),
+      FitrahRecord.aggregate([{ $group: { _id: null, total: { $sum: '$amount' } } }])
+    ]);
 
-      return serialize({
-        totalIncome: incomeAgg[0]?.total ?? 0,
-        yearlyExpense: expenseAgg[0]?.total ?? 0,
-        totalDonation: donationAgg[0]?.total ?? 0,
-        activeProjects: projectCount,
-        totalShop: shopCount,
-        totalFitrah: fitrahAgg[0]?.total ?? 0
-      });
-    } catch {
-      return {
-        totalIncome: 65000,
-        yearlyExpense: 21000,
-        totalDonation: 12000,
-        activeProjects: 1,
-        totalShop: 0,
-        totalFitrah: 0
-      };
-    }
-  }, ['public-summary-metrics'], { revalidate: 60 });
+    return serialize({
+      totalIncome: incomeAgg[0]?.total ?? 0,
+      yearlyExpense: expenseAgg[0]?.total ?? 0,
+      totalDonation: donationAgg[0]?.total ?? 0,
+      activeProjects: projectCount,
+      totalShop: shopCount,
+      totalFitrah: fitrahAgg[0]?.total ?? 0
+    });
+  }, ['public-summary-metrics'], { revalidate: 60, tags: ['public-summary-metrics'] });
 
-  return getSummaryMetricsCached();
+  try {
+    return await getSummaryMetricsCached();
+  } catch {
+    // Only used for this one request; a failed revalidation never overwrites
+    // the cache entry with placeholder numbers.
+    return {
+      totalIncome: 65000,
+      yearlyExpense: 21000,
+      totalDonation: 12000,
+      activeProjects: 1,
+      totalShop: 0,
+      totalFitrah: 0
+    };
+  }
 }
 
 export async function getProjects() {
@@ -209,16 +214,16 @@ export async function getProjects() {
   }
 
   const getProjectsCached = unstable_cache(async () => {
-    try {
-      await connectToDatabase();
-      const projects = await Project.find().sort({ createdAt: -1 }).lean();
-      return serialize(projects);
-    } catch {
-      return [];
-    }
-  }, ['public-projects'], { revalidate: 90 });
+    await connectToDatabase();
+    const projects = await Project.find().sort({ createdAt: -1 }).lean();
+    return serialize(projects);
+  }, ['public-projects'], { revalidate: 90, tags: ['public-projects'] });
 
-  return getProjectsCached();
+  try {
+    return await getProjectsCached();
+  } catch {
+    return [];
+  }
 }
 
 export async function getGallery() {
@@ -227,25 +232,29 @@ export async function getGallery() {
   }
 
   const getGalleryCached = unstable_cache(async () => {
-    try {
-      await connectToDatabase();
-      const items = await GalleryItem.find().sort({ order: 1, createdAt: -1 }).lean();
-      return serialize(items);
-    } catch {
-      return [];
-    }
-  }, ['public-gallery'], { revalidate: 90 });
+    await connectToDatabase();
+    const items = await GalleryItem.find().sort({ order: 1, createdAt: -1 }).lean();
+    return serialize(items);
+  }, ['public-gallery'], { revalidate: 90, tags: ['public-gallery'] });
 
-  return getGalleryCached();
+  try {
+    return await getGalleryCached();
+  } catch {
+    return [];
+  }
 }
 
 export async function getIncomeRecords() {
   if (!isDatabaseConfigured()) return [];
 
-  try {
+  const getIncomeRecordsCached = unstable_cache(async () => {
     await connectToDatabase();
     const records = await IncomeRecord.find().sort({ createdAt: -1 }).limit(200).lean();
-     return serialize(records);
+    return serialize(records);
+  }, ['public-income-records'], { revalidate: 60, tags: ['public-income-records'] });
+
+  try {
+    return await getIncomeRecordsCached();
   } catch {
     return [];
   }
@@ -254,10 +263,14 @@ export async function getIncomeRecords() {
 export async function getExpenseRecords() {
   if (!isDatabaseConfigured()) return [];
 
-  try {
+  const getExpenseRecordsCached = unstable_cache(async () => {
     await connectToDatabase();
-     const records = await ExpenseRecord.find().sort({ createdAt: -1 }).limit(200).lean();
-     return serialize(records);
+    const records = await ExpenseRecord.find().sort({ createdAt: -1 }).limit(200).lean();
+    return serialize(records);
+  }, ['public-expense-records'], { revalidate: 60, tags: ['public-expense-records'] });
+
+  try {
+    return await getExpenseRecordsCached();
   } catch {
     return [];
   }
@@ -266,10 +279,14 @@ export async function getExpenseRecords() {
 export async function getShopRecords() {
   if (!isDatabaseConfigured()) return [];
 
-  try {
+  const getShopRecordsCached = unstable_cache(async () => {
     await connectToDatabase();
-     const records = await ShopRecord.find().sort({ year: -1, month: -1, date: -1, createdAt: -1 }).limit(200).lean();
-     return serialize(records);
+    const records = await ShopRecord.find().sort({ year: -1, month: -1, date: -1, createdAt: -1 }).limit(200).lean();
+    return serialize(records);
+  }, ['public-shop-records'], { revalidate: 60, tags: ['public-shop-records'] });
+
+  try {
+    return await getShopRecordsCached();
   } catch {
     return [];
   }
@@ -278,10 +295,14 @@ export async function getShopRecords() {
 export async function getDonationRecords() {
   if (!isDatabaseConfigured()) return [];
 
-  try {
+  const getDonationRecordsCached = unstable_cache(async () => {
     await connectToDatabase();
-     const records = await Donation.find().sort({ createdAt: -1 }).limit(200).lean();
-     return serialize(records);
+    const records = await Donation.find().sort({ createdAt: -1 }).limit(200).lean();
+    return serialize(records);
+  }, ['public-donation-records'], { revalidate: 60, tags: ['public-donation-records'] });
+
+  try {
+    return await getDonationRecordsCached();
   } catch {
     return [];
   }
@@ -290,10 +311,14 @@ export async function getDonationRecords() {
 export async function getRamadanDonationRecords() {
   if (!isDatabaseConfigured()) return [];
 
-  try {
+  const getRamadanDonationRecordsCached = unstable_cache(async () => {
     await connectToDatabase();
     const records = await RamadanDonation.find().sort({ createdAt: -1 }).limit(200).lean();
     return serialize(records);
+  }, ['public-ramadan-donation-records'], { revalidate: 60, tags: ['public-ramadan-donation-records'] });
+
+  try {
+    return await getRamadanDonationRecordsCached();
   } catch {
     return [];
   }
@@ -302,10 +327,14 @@ export async function getRamadanDonationRecords() {
 export async function getRamadanExpenseRecords() {
   if (!isDatabaseConfigured()) return [];
 
-  try {
+  const getRamadanExpenseRecordsCached = unstable_cache(async () => {
     await connectToDatabase();
     const records = await RamadanExpense.find().sort({ createdAt: -1 }).limit(200).lean();
     return serialize(records);
+  }, ['public-ramadan-expense-records'], { revalidate: 60, tags: ['public-ramadan-expense-records'] });
+
+  try {
+    return await getRamadanExpenseRecordsCached();
   } catch {
     return [];
   }
@@ -314,10 +343,14 @@ export async function getRamadanExpenseRecords() {
 export async function getFitrahRecords() {
   if (!isDatabaseConfigured()) return [];
 
-  try {
+  const getFitrahRecordsCached = unstable_cache(async () => {
     await connectToDatabase();
-     const records = await FitrahRecord.find().sort({ createdAt: -1 }).limit(200).lean();
-     return serialize(records);
+    const records = await FitrahRecord.find().sort({ createdAt: -1 }).limit(200).lean();
+    return serialize(records);
+  }, ['public-fitrah-records'], { revalidate: 60, tags: ['public-fitrah-records'] });
+
+  try {
+    return await getFitrahRecordsCached();
   } catch {
     return [];
   }

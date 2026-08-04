@@ -1,5 +1,3 @@
-export const dynamic = 'force-dynamic';
-
 import { getTranslations } from 'next-intl/server';
 import { getGallery, getProjects, getSiteSettings, getSummaryMetrics, getTodayPrayerTimes } from '@/lib/public-data';
 import { Link } from '@/navigation';

@@ -3,6 +3,7 @@ import { apiError, json } from '@/lib/api';
 import { getServerSession } from '@/lib/auth';
 import { resourceMap } from '@/lib/admin-resources';
 import { minutesToCanonical24, parsePrayerTimeToMinutes } from '@/lib/prayer-activity';
+import { revalidatePublicData } from '@/lib/revalidate-public';
 
 type Params = { params: Promise<{ collection: string; id: string }> };
 
@@ -60,6 +61,7 @@ export async function PATCH(request: Request, { params }: Params) {
     await resource.model.deleteMany({ _id: { $ne: updated._id } });
   }
 
+  revalidatePublicData(collection);
   return json({ ok: true, item: updated });
 }
 
@@ -73,5 +75,6 @@ export async function DELETE(_request: Request, { params }: Params) {
 
   await connectToDatabase();
   await resource.model.findByIdAndDelete(id);
+  revalidatePublicData(collection);
   return json({ ok: true });
 }

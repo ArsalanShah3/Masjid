@@ -5,6 +5,11 @@ export const runtime = 'nodejs';
 
 const MAX_FILE_SIZE = 50 * 1024 * 1024; // allow up to 50MB for video uploads
 
+// Target range for compressed images before they reach Cloudinary.
+const TARGET_MAX_BYTES = 300 * 1024;
+const TARGET_MIN_BYTES = 100 * 1024;
+const MAX_DIMENSION = 1920;
+
 type CloudinaryUploadResult = {
   secure_url: string;
   public_id: string;
@@ -21,6 +26,44 @@ function getCloudinaryEnv() {
   }
 
   return { cloudName, apiKey, apiSecret, folder };
+}
+
+// Resizes to a sane max dimension, then steps quality down until the result
+// is under TARGET_MAX_BYTES (or quality bottoms out). Animated images
+// (GIF/WebP with multiple frames) are passed through untouched since
+// re-encoding would drop the animation.
+async function compressImage(buffer: Buffer, mimeType: string): Promise<{ buffer: Buffer; contentType: string }> {
+  const sharp = (await import('sharp')).default;
+
+  const image = sharp(buffer, { animated: true });
+  const metadata = await image.metadata();
+
+  if ((metadata.pages ?? 1) > 1) {
+    return { buffer, contentType: mimeType };
+  }
+
+  const resized = image.rotate().resize({
+    width: MAX_DIMENSION,
+    height: MAX_DIMENSION,
+    fit: 'inside',
+    withoutEnlargement: true
+  });
+
+  let quality = 80;
+  let output = await resized.clone().jpeg({ quality, mozjpeg: true }).toBuffer();
+
+  while (output.length > TARGET_MAX_BYTES && quality > 35) {
+    quality -= 10;
+    output = await resized.clone().jpeg({ quality, mozjpeg: true }).toBuffer();
+  }
+
+  // If the source was already tiny and our re-encode made it bigger, keep
+  // whichever is smaller rather than penalizing already-small images.
+  if (buffer.length < TARGET_MIN_BYTES && buffer.length < output.length) {
+    return { buffer, contentType: mimeType };
+  }
+
+  return { buffer: output, contentType: 'image/jpeg' };
 }
 
 export async function POST(request: Request) {
@@ -70,7 +113,17 @@ export async function POST(request: Request) {
       secure: true
     });
 
-    const fileBuffer = Buffer.from(await file.arrayBuffer());
+    let fileBuffer: Buffer<ArrayBufferLike> = Buffer.from(await file.arrayBuffer());
+
+    if (mediaType === 'image') {
+      try {
+        const compressed = await compressImage(fileBuffer, file.type);
+        fileBuffer = compressed.buffer;
+      } catch {
+        // If compression fails for any reason (corrupt file, unsupported
+        // format, etc.) fall back to uploading the original untouched.
+      }
+    }
 
     const result = await new Promise<CloudinaryUploadResult>((resolve, reject) => {
       const upload = cloudinary.uploader.upload_stream(
@@ -78,7 +131,16 @@ export async function POST(request: Request) {
           folder: env.folder,
           resource_type: mediaType === 'video' ? 'video' : 'image',
           overwrite: false,
-          unique_filename: true
+          unique_filename: true,
+          // Videos aren't practical to re-encode in a serverless function
+          // without an ffmpeg binary, so compression happens on Cloudinary's
+          // side via eager quality/bitrate transforms at upload time.
+          ...(mediaType === 'video'
+            ? {
+                eager: [{ quality: 'auto:good', fetch_format: 'auto' }],
+                eager_async: false
+              }
+            : {})
         },
         (error, uploadResult) => {
           if (error) {
@@ -91,7 +153,8 @@ export async function POST(request: Request) {
             return;
           }
 
-          resolve({ secure_url: uploadResult.secure_url, public_id: uploadResult.public_id });
+          const eagerUrl = uploadResult.eager?.[0]?.secure_url;
+          resolve({ secure_url: eagerUrl || uploadResult.secure_url, public_id: uploadResult.public_id });
         }
       );
 

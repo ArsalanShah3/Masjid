@@ -70,6 +70,26 @@ function getNextMonthYear(month: number, year: number) {
   return { month: month + 1, year };
 }
 
+function getMonthYearFromDate(dateValue: string) {
+  const rawValue = String(dateValue ?? '').trim();
+  if (!rawValue) {
+    return null;
+  }
+
+  const date = /^\d{4}-\d{2}-\d{2}$/.test(rawValue)
+    ? new Date(`${rawValue}T00:00:00Z`)
+    : new Date(rawValue);
+
+  if (Number.isNaN(date.getTime())) {
+    return null;
+  }
+
+  return {
+    month: date.getUTCMonth() + 1,
+    year: date.getUTCFullYear()
+  };
+}
+
 function getNewRecordDefaults(resourceKey: string) {
   const now = new Date();
   const currentMonth = now.getMonth() + 1;
@@ -160,6 +180,8 @@ export default function AdminResourcePage() {
   const [paymentShopId, setPaymentShopId] = useState<string>('');
   const [paymentMonth, setPaymentMonth] = useState<number>(new Date().getMonth() + 1);
   const [paymentYear, setPaymentYear] = useState<number>(new Date().getFullYear());
+  const [paymentDate, setPaymentDate] = useState<string>(new Date().toISOString().slice(0, 10));
+  const [paymentPreviousBalance, setPaymentPreviousBalance] = useState<string>('');
   const [paymentAmount, setPaymentAmount] = useState<string>('');
   const [paymentNote, setPaymentNote] = useState('');
   const [paymentError, setPaymentError] = useState<string | null>(null);
@@ -192,7 +214,8 @@ export default function AdminResourcePage() {
     setPaymentShopId(shopKey);
     const latestShopRecord = getLatestShopRecord(items, shopKey);
     const shop = latestShopRecord as Record<string, unknown> | undefined;
-    setPaymentAmount(shop ? String(shop.monthlyRent ?? '') : '');
+    setPaymentPreviousBalance(shop ? String(shop.debtAmount ?? 0) : '');
+    setPaymentAmount('');
     setPaymentNote('');
     const now = new Date();
     const defaultMonth = Number(shop?.month || now.getMonth() + 1);
@@ -200,6 +223,7 @@ export default function AdminResourcePage() {
     const nextMonthYear = getNextMonthYear(defaultMonth, defaultYear);
     setPaymentMonth(shop ? nextMonthYear.month : now.getMonth() + 1);
     setPaymentYear(shop ? nextMonthYear.year : now.getFullYear());
+    setPaymentDate(now.toISOString().slice(0, 10));
     setPaymentError(null);
   }
 
@@ -216,44 +240,38 @@ export default function AdminResourcePage() {
       return;
     }
 
-    const previousDebt = Number(shop.debtAmount ?? 0);
+    const previousBalance = Number(paymentPreviousBalance || 0);
     const currentMonthlyRent = Number(shop.monthlyRent || 0);
-    const totalDueBeforePayment = previousDebt + currentMonthlyRent;
+    const totalDueBeforePayment = previousBalance + currentMonthlyRent;
     const paidAmount = Number(paymentAmount || 0);
+    const paymentAmountToSave = paidAmount <= 0 ? 0 : Math.min(paidAmount, totalDueBeforePayment);
+    const remainingBalance = Math.max(0, totalDueBeforePayment - paymentAmountToSave);
 
     let computedStatus: 'Clear' | 'Due' | 'Partial';
-    let computedDebt = totalDueBeforePayment;
-    let paymentAmountToSave = 0;
-
-    if (paidAmount <= 0) {
+    if (paymentAmountToSave <= 0) {
       computedStatus = 'Due';
-      computedDebt = totalDueBeforePayment;
-      paymentAmountToSave = 0;
-    } else if (paidAmount >= totalDueBeforePayment) {
+    } else if (remainingBalance === 0) {
       computedStatus = 'Clear';
-      computedDebt = 0;
-      paymentAmountToSave = totalDueBeforePayment;
     } else {
       computedStatus = 'Partial';
-      computedDebt = totalDueBeforePayment - paidAmount;
-      paymentAmountToSave = paidAmount;
     }
+
+    const requestedMonthYear = getMonthYearFromDate(paymentDate);
+    const paymentMonthToSave = requestedMonthYear?.month ?? paymentMonth;
+    const paymentYearToSave = requestedMonthYear?.year ?? paymentYear;
 
     const payload = {
       shopName: String(shop.shopName || ''),
       ownerName: String(shop.ownerName || ''),
-      contactNumber: String(shop.contactNumber || ''),
       buyDate: String(shop.buyDate ?? shop.date ?? new Date().toISOString().slice(0, 10)),
-      buyRate: Number(shop.buyRate ?? 0),
-      debtAmount: computedDebt,
       monthlyRent: currentMonthlyRent,
-      monthsDue: Number(shop.monthsDue || 0),
-      month: paymentMonth,
-      year: paymentYear,
-      paymentStatus: computedStatus,
+      month: paymentMonthToSave,
+      year: paymentYearToSave,
+      previousBalance,
       paymentAmount: paymentAmountToSave,
+      date: paymentDate,
       note: paymentNote?.trim() ? String(paymentNote).trim() : String(shop.note ?? ''),
-      date: String(shop.date ?? shop.buyDate ?? new Date().toISOString().slice(0, 10))
+      paymentStatus: computedStatus
     };
 
     try {
@@ -274,10 +292,12 @@ export default function AdminResourcePage() {
       setSelectedShopForDetails(responseData.item ?? shop);
       setShopDetailsOpen(true);
       setPaymentShopId('');
+      setPaymentPreviousBalance('');
       setPaymentAmount('');
       setPaymentNote('');
       setPaymentMonth(new Date().getMonth() + 1);
       setPaymentYear(new Date().getFullYear());
+      setPaymentDate(new Date().toISOString().slice(0, 10));
       setPaymentError(null);
       toast.success(tToast('updatedSuccessfully'));
     } catch {
@@ -363,26 +383,6 @@ export default function AdminResourcePage() {
           cell: ({ getValue }: { getValue: () => unknown }) => (
             <span className="block max-w-[260px] break-words">{formatCurrency(Number(getValue() ?? 0))}</span>
           )
-        },
-        {
-          accessorKey: 'paymentStatus',
-          header: 'Payment Status',
-          cell: ({ getValue }: { getValue: () => unknown }) => {
-            const status = String(getValue() ?? '');
-            return (
-              <span
-                className={`inline-block px-2 py-1 rounded text-xs font-semibold ${
-                  status === 'Clear'
-                    ? 'bg-green-100 text-green-800'
-                    : status === 'Due'
-                      ? 'bg-red-100 text-red-800'
-                      : 'bg-yellow-100 text-yellow-800'
-                }`}
-              >
-                {status}
-              </span>
-            );
-          }
         }
       ];
     }
@@ -423,7 +423,7 @@ export default function AdminResourcePage() {
     ? currentResource.fields.filter((field) => staffCreateOnlyFieldNames.has(field.name))
     : currentResource.fields;
   const selectedPaymentShop = getLatestShopRecord(items, paymentShopId) as Record<string, unknown> | undefined;
-  const currentDueAmount = Number(selectedPaymentShop?.debtAmount ?? 0) + Number(selectedPaymentShop?.monthlyRent ?? 0);
+  const currentDueAmount = Number(paymentPreviousBalance || String(selectedPaymentShop?.debtAmount ?? 0)) + Number(selectedPaymentShop?.monthlyRent ?? 0);
   const managingResourcesText = t('managingResources', { resource: currentResource.title.toLowerCase() });
   const selectedPaymentMonthLabel = paymentMonth ? new Date(0, paymentMonth - 1).toLocaleString('en-US', { month: 'long' }) : '-';
   const latestPrayerTimesRecord = useMemo(() => {
@@ -704,7 +704,7 @@ export default function AdminResourcePage() {
               </label>
 
               <div className="rounded-2xl border border-slate-200 bg-slate-50 p-4">
-                <div className="text-xs font-semibold uppercase tracking-[0.16em] text-slate-500">Current Due</div>
+                <div className="text-xs font-semibold uppercase tracking-[0.16em] text-slate-500">Total Due Before Payment</div>
                 <div className="mt-2 text-xl font-black text-slate-900">{formatCurrency(currentDueAmount)}</div>
                 <div className="mt-2 text-sm text-slate-600">Entry will be saved for {selectedPaymentMonthLabel} {paymentYear}</div>
               </div>
@@ -712,8 +712,13 @@ export default function AdminResourcePage() {
 
             <div className="grid gap-4 md:grid-cols-3">
               <div className="rounded-2xl border border-slate-200 bg-slate-50 p-4">
-                <div className="text-xs font-semibold uppercase tracking-[0.16em] text-slate-500">Current Status</div>
-                <div className="mt-2 font-medium text-slate-900">{String(selectedPaymentShop?.paymentStatus ?? '-')}</div>
+                <div className="text-xs font-semibold uppercase tracking-[0.16em] text-slate-500">Previous Balance</div>
+                <input
+                  value={paymentPreviousBalance}
+                  onChange={(event) => setPaymentPreviousBalance(event.target.value)}
+                  type="number"
+                  className="mt-2 w-full rounded-lg border border-slate-300 bg-white px-3 py-2 text-sm text-slate-900 shadow-sm focus:border-emerald-500 focus:outline-none"
+                />
               </div>
               <div className="rounded-2xl border border-slate-200 bg-slate-50 p-4">
                 <div className="text-xs font-semibold uppercase tracking-[0.16em] text-slate-500">Monthly Rent</div>
@@ -726,6 +731,22 @@ export default function AdminResourcePage() {
             </div>
 
             <div className="grid gap-4 md:grid-cols-2">
+              <label className="min-w-0">
+                <div className="mb-2 text-sm font-semibold">Date</div>
+                <input
+                  value={paymentDate}
+                  onChange={(event) => {
+                    const next = getMonthYearFromDate(event.target.value);
+                    setPaymentDate(event.target.value);
+                    if (next) {
+                      setPaymentMonth(next.month);
+                      setPaymentYear(next.year);
+                    }
+                  }}
+                  type="date"
+                  className="w-full rounded-lg border border-slate-300 bg-white px-3 py-2 text-sm text-slate-900 shadow-sm focus:border-emerald-500 focus:outline-none"
+                />
+              </label>
               <label className="min-w-0">
                 <div className="mb-2 text-sm font-semibold">Payment Amount (Rs)</div>
                 <input
