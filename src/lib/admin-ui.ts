@@ -129,14 +129,10 @@ export const adminResources: ResourceConfig[] = [
     searchKeys: ['shopName', 'ownerName', 'contactNumber', 'serialNumber', 'date', 'month', 'year', 'note'],
     fields: [
       { name: 'shopName', label: 'Shop Name', type: 'text' },
-      { name: 'ownerName', label: 'Tenant Name', type: 'text' },
-      { name: 'contactNumber', label: 'Contact Number', type: 'text' },
-      { name: 'buyDate', label: 'Buy Date', type: 'date' },
-      { name: 'date', label: 'Date', type: 'date' },
-      { name: 'monthlyRent', label: 'Monthly Rent (Rs)', type: 'number' },
-      { name: 'month', label: 'Month', type: 'number' },
-      { name: 'year', label: 'Year', type: 'number' },
-      { name: 'note', label: 'Note', type: 'textarea' }
+      { name: 'ownerName', label: 'Rental Name', type: 'text' },
+      { name: 'buyDate', label: 'Date', type: 'date' },
+      { name: 'note', label: 'Note', type: 'textarea' },
+      { name: 'monthlyRent', label: 'Monthly Rent (Rs)', type: 'number' }
     ]
   },
   {

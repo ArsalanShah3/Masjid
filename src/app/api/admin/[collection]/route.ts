@@ -67,6 +67,33 @@ function normalizePrayerTimesBody(body: Record<string, unknown>) {
   return { ok: true as const };
 }
 
+function normalizeShopRecordBody(body: Record<string, unknown>) {
+  const dateValue = String(body.buyDate ?? body.date ?? '').trim() || new Date().toISOString().slice(0, 10);
+  const date = /^\d{4}-\d{2}-\d{2}$/.test(dateValue)
+    ? new Date(`${dateValue}T00:00:00Z`)
+    : new Date(dateValue);
+
+  if (Number.isNaN(date.getTime())) {
+    return { ok: false as const, message: 'Invalid shop date. Use a valid date.' };
+  }
+
+  body.buyDate = dateValue;
+  body.date = String(body.date ?? dateValue).trim() || dateValue;
+  body.month = /^\d{4}-\d{2}-\d{2}$/.test(dateValue) ? date.getUTCMonth() + 1 : date.getMonth() + 1;
+  body.year = /^\d{4}-\d{2}-\d{2}$/.test(dateValue) ? date.getUTCFullYear() : date.getFullYear();
+
+  return { ok: true as const };
+}
+
+async function ensureDatabaseReady() {
+  try {
+    await connectToDatabase();
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 export async function GET(_request: Request, { params }: Params) {
   const { collection } = await params;
   const resource = resourceMap[collection as keyof typeof resourceMap];
@@ -76,32 +103,38 @@ export async function GET(_request: Request, { params }: Params) {
   const session = await getServerSession();
   if (!session) return apiError('Unauthorized', 401);
 
-  await connectToDatabase();
-
-  if (collection === 'shop-records') {
-    const url = new URL(_request.url);
-    const serialQuery = url.searchParams.get('serial');
-    if (serialQuery !== null) {
-      const trimmedSerial = serialQuery.trim();
-      if (!trimmedSerial) {
-        return apiError('Serial number is required', 400);
-      }
-
-      const found = await resource.model.findOne({ serialNumber: trimmedSerial }).lean();
-      if (!found) {
-        return json({ ok: true, item: null, found: false, message: 'No shop record found for this serial number.' });
-      }
-
-      return json({ ok: true, item: found, found: true });
-    }
+  if (!(await ensureDatabaseReady())) {
+    return apiError('Database connection unavailable', 503);
   }
 
-  const items = await (collection === 'shop-records'
-    ? resource.model.find().sort({ year: -1, month: -1, date: -1, createdAt: -1 }).lean()
-    : collection === 'prayer-times'
-      ? resource.model.find().sort({ dateKey: -1, createdAt: -1 }).lean()
-      : resource.model.find().sort({ createdAt: -1 }).lean());
-  return json({ ok: true, items });
+  try {
+    if (collection === 'shop-records') {
+      const url = new URL(_request.url);
+      const serialQuery = url.searchParams.get('serial');
+      if (serialQuery !== null) {
+        const trimmedSerial = serialQuery.trim();
+        if (!trimmedSerial) {
+          return apiError('Serial number is required', 400);
+        }
+
+        const found = await resource.model.findOne({ serialNumber: trimmedSerial }).lean();
+        if (!found) {
+          return json({ ok: true, item: null, found: false, message: 'No shop record found for this serial number.' });
+        }
+
+        return json({ ok: true, item: found, found: true });
+      }
+    }
+
+    const items = await (collection === 'shop-records'
+      ? resource.model.find().sort({ year: -1, month: -1, date: -1, createdAt: -1 }).lean()
+      : collection === 'prayer-times'
+        ? resource.model.find().sort({ dateKey: -1, createdAt: -1 }).lean()
+        : resource.model.find().sort({ createdAt: -1 }).lean());
+    return json({ ok: true, items });
+  } catch {
+    return apiError('Database query failed', 503);
+  }
 }
 
 export async function POST(request: Request, { params }: Params) {
@@ -116,6 +149,10 @@ export async function POST(request: Request, { params }: Params) {
 
   const session = await getServerSession();
   if (!session) return apiError('Unauthorized', 401);
+
+  if (!(await ensureDatabaseReady())) {
+    return apiError('Database connection unavailable', 503);
+  }
 
   const body = await request.json().catch(() => null);
   if (!body || typeof body !== 'object') {
@@ -141,6 +178,13 @@ export async function POST(request: Request, { params }: Params) {
     const candidate = body as Record<string, unknown>;
     if (candidate.date == null || String(candidate.date).trim() === '') {
       candidate.date = new Date().toISOString().slice(0, 10);
+    }
+  }
+
+  if (collection === 'shop-records') {
+    const normalized = normalizeShopRecordBody(body as Record<string, unknown>);
+    if (!normalized.ok) {
+      return apiError(normalized.message, 400);
     }
   }
 
