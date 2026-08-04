@@ -68,7 +68,7 @@ function normalizePrayerTimesBody(body: Record<string, unknown>) {
 }
 
 function normalizeShopRecordBody(body: Record<string, unknown>) {
-  const dateValue = String(body.buyDate ?? body.date ?? '').trim() || new Date().toISOString().slice(0, 10);
+  const dateValue = String(body.date ?? body.buyDate ?? '').trim() || new Date().toISOString().slice(0, 10);
   const date = /^\d{4}-\d{2}-\d{2}$/.test(dateValue)
     ? new Date(`${dateValue}T00:00:00Z`)
     : new Date(dateValue);
@@ -77,10 +77,15 @@ function normalizeShopRecordBody(body: Record<string, unknown>) {
     return { ok: false as const, message: 'Invalid shop date. Use a valid date.' };
   }
 
-  body.buyDate = dateValue;
-  body.date = String(body.date ?? dateValue).trim() || dateValue;
-  body.month = /^\d{4}-\d{2}-\d{2}$/.test(dateValue) ? date.getUTCMonth() + 1 : date.getMonth() + 1;
-  body.year = /^\d{4}-\d{2}-\d{2}$/.test(dateValue) ? date.getUTCFullYear() : date.getFullYear();
+  body.date = dateValue;
+  if (body.buyDate == null || String(body.buyDate).trim() === '') {
+    body.buyDate = dateValue;
+  }
+
+  if (body.month == null || body.year == null) {
+    body.month = /^\d{4}-\d{2}-\d{2}$/.test(dateValue) ? date.getUTCMonth() + 1 : date.getMonth() + 1;
+    body.year = /^\d{4}-\d{2}-\d{2}$/.test(dateValue) ? date.getUTCFullYear() : date.getFullYear();
+  }
 
   return { ok: true as const };
 }
@@ -251,6 +256,7 @@ export async function POST(request: Request, { params }: Params) {
     const year = Number(input.year ?? 0);
     const currentMonthlyRent = Number(input.monthlyRent ?? 0);
     const paidAmount = Number(input.paymentAmount ?? 0);
+    const manualPreviousBalance = Number((input as Record<string, unknown>).previousBalance ?? Number.NaN);
 
     if (!shopName || !ownerName) {
       return apiError('Shop name and tenant name are required.', 400);
@@ -291,10 +297,12 @@ export async function POST(request: Request, { params }: Params) {
     // Total unpaid arrears from all earlier months, as they stood before this
     // transaction's payment is applied. This is what "Previous Balance" means:
     // how much the shop still owed from before, separate from this month's rent.
-    const previousBalanceBeforePayment = priorRecords.reduce(
-      (sum, record) => sum + Number(record.debtAmount ?? 0),
-      0
-    );
+    const previousBalanceBeforePayment = Number.isFinite(manualPreviousBalance) && manualPreviousBalance >= 0
+      ? manualPreviousBalance
+      : priorRecords.reduce(
+          (sum, record) => sum + Number(record.debtAmount ?? 0),
+          0
+        );
 
     const rentHistoryEntries: Record<string, Record<string, unknown>> = {};
 
@@ -349,14 +357,20 @@ export async function POST(request: Request, { params }: Params) {
     });
 
     const currentEntry = rentHistoryEntries[currentKey] as Record<string, unknown>;
-    const currentBalance = Number(currentEntry.remainingBalance ?? 0);
-    const currentStatus = currentBalance === 0 ? 'Clear' : (Number(currentEntry.paidAmount ?? 0) > 0 ? 'Partial' : 'Due');
+    const paymentDate = String(shopData.date ?? existingRecord?.date ?? new Date().toISOString().slice(0, 10));
+    const currentBalance = Math.max(0, previousBalanceBeforePayment + currentMonthlyRent - Math.min(paidAmount, previousBalanceBeforePayment + currentMonthlyRent));
+    const savedPaymentAmount = Math.min(Math.max(0, paidAmount), previousBalanceBeforePayment + currentMonthlyRent);
+    const currentStatus = currentBalance === 0 ? 'Clear' : (savedPaymentAmount > 0 ? 'Partial' : 'Due');
 
     currentEntry.previousBalance = previousBalanceBeforePayment;
+    currentEntry.remainingBalance = currentBalance;
+    currentEntry.paidAmount = savedPaymentAmount;
+    currentEntry.status = currentStatus;
+    currentEntry.paymentDate = paymentDate;
 
     (parsed.data as Record<string, unknown>).monthlyRent = currentMonthlyRent;
     (parsed.data as Record<string, unknown>).debtAmount = currentBalance;
-    (parsed.data as Record<string, unknown>).paymentAmount = Number(currentEntry.paidAmount ?? 0);
+    (parsed.data as Record<string, unknown>).paymentAmount = savedPaymentAmount;
     (parsed.data as Record<string, unknown>).paymentStatus = currentStatus;
     (parsed.data as Record<string, unknown>).previousBalance = previousBalanceBeforePayment;
     (parsed.data as Record<string, unknown>).rentHistory = rentHistoryEntries;
