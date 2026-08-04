@@ -90,6 +90,24 @@ function normalizeShopRecordBody(body: Record<string, unknown>) {
   return { ok: true as const };
 }
 
+function deriveFallbackDate(record: Record<string, unknown>) {
+  const rawDate = String(record.date ?? '').trim();
+  if (rawDate) {
+    return record;
+  }
+
+  const month = Number(record.month ?? 0);
+  const year = Number(record.year ?? 0);
+  if (!Number.isFinite(month) || !Number.isFinite(year) || month < 1 || month > 12) {
+    return record;
+  }
+
+  return {
+    ...record,
+    date: new Date(Date.UTC(year, month - 1, 1)).toISOString().slice(0, 10)
+  };
+}
+
 async function ensureDatabaseReady() {
   try {
     await connectToDatabase();
@@ -136,7 +154,12 @@ export async function GET(_request: Request, { params }: Params) {
       : collection === 'prayer-times'
         ? resource.model.find().sort({ dateKey: -1, createdAt: -1 }).lean()
         : resource.model.find().sort({ createdAt: -1 }).lean());
-    return json({ ok: true, items });
+
+    const hydratedItems = collection === 'expense-records'
+      ? (items as Array<Record<string, unknown>>).map((item) => deriveFallbackDate(item))
+      : items;
+
+    return json({ ok: true, items: hydratedItems });
   } catch {
     return apiError('Database query failed', 503);
   }
@@ -179,7 +202,7 @@ export async function POST(request: Request, { params }: Params) {
     }
   }
 
-  if (collection === 'income-records') {
+  if (collection === 'income-records' || collection === 'expense-records') {
     const candidate = body as Record<string, unknown>;
     if (candidate.date == null || String(candidate.date).trim() === '') {
       candidate.date = new Date().toISOString().slice(0, 10);
